@@ -1,0 +1,600 @@
+#!/usr/bin/bash
+
+# log function is a file copy-pasted here, from
+# https://github.com/klapptnot/bash.sh
+declare -gra LOGGER_LOG_COLORS=(
+  ''
+  '\x1b[30m\x1b[41m'
+  '\x1b[31m'
+  '\x1b[33m'
+  '\x1b[34m'
+  '\x1b[32m'
+)
+declare -gra LOGGER_LEVEL_NAMES=(
+  'OFF'   # 0
+  'CRIT'  # 1
+  'ERROR' # 2
+  'WARN'  # 3
+  'INFO'  # 4
+  'DEBUG' # 5
+)
+declare -grA LOGGER_LEVEL_NUMS=(
+  ['o']=0
+  ['c']=1
+  ['e']=2
+  ['w']=3
+  ['i']=4
+  ['d']=5
+)
+
+function stow::log {
+  [[ -z "${1}" ]] && return
+
+  : "${1:0:1}"
+  local -ri level="${LOGGER_LEVEL_NUMS[${_,,}]:-0}"
+  local -ri log_level="${LOGGER_LEVEL:-0}"
+  ((0 == log_level || level > log_level)) && return
+
+  # shellcheck disable=SC2059
+  printf -v message "${2}" "${@:3}"
+
+  local color="${LOGGER_LOG_COLORS[level]}"
+  if ((${#1} > 1)); then
+    printf '%b[%(%F %T)T] %5s: %s\x1b[0m\n' "${color}" -1 "${LOGGER_LEVEL_NAMES[level]}" "${message}"
+  else
+    printf '%b%s\x1b[0m\n' "${color}" "${message}"
+  fi
+}
+
+# function from barg.sh
+# https://github.com/klapptnot/barg.sh
+function barg::normalize_args {
+  local i=0
+  while ((i < ${#argv[@]})); do
+    [[ "${argv[i]}" == "--" ]] && ((i = i + 2)) && continue
+    if [[ "${argv[i]}" != -* ]] || [ "${#argv[i]}" -eq 2 ] || [[ "${argv[i]}" == --* ]] || [[ "${argv[i]}" == '-' ]]; then
+      ((i++))
+      continue
+    fi
+    if [[ "${argv[i]}" =~ ^-[A-Za-z][0-9_\.]*$ ]]; then
+      argv=(
+        "${argv[@]:0:i}"
+        "${argv[i]:0:2}"
+        "${argv[i]:2:${#argv[i]}}"
+        "${argv[@]:(i + 1)}"
+      )
+    else
+      argv[i]="${argv[i]:1}"
+      local -a __slices__=()
+      for ((j = 0; j < ${#argv[i]}; j++)); do
+        __slices__+=("-${argv[i]:j:1}")
+      done
+      if [[ "${#__slices__[@]}" -gt 0 ]]; then
+        argv=(
+          "${argv[@]:0:i}"
+          "${__slices__[@]}"
+          "${argv[@]:(i + 1)}"
+        )
+      fi
+      unset __slices__
+    fi
+    ((i++))
+  done
+}
+
+# Display help message for stow command
+# stow help
+function stow::show_help_message {
+  local help_lines=(
+    "\x1b[1;34m${STOW_EXEC_NAME}\x1b[0m: GNU Stow-like symlink farm manager"
+    ""
+    '\x1b[1;34mUsage\x1b[0m:'
+    "  \x1b[38;5;14m${STOW_EXEC_NAME}\x1b[0m [OPTIONS] PACKAGE..."
+    "  \x1b[38;5;14m${STOW_EXEC_NAME}\x1b[0m help"
+    ""
+    '\x1b[1;34mSubcommands\x1b[0m:'
+    "  help        Show this help message and exit"
+    ""
+    '\x1b[1;34mOptions\x1b[0m:'
+    '  -S, --stow              Stow packages'
+    '  -D, --delete            Delete (unstow) packages'
+    '  -R, --restow            Restow packages (delete then stow)'
+    '  -t, --target \x1b[38;5;15m<dir>\x1b[0m      Set target directory (default: parent of stow dir)'
+    '  -d, --dir \x1b[38;5;15m<dir>\x1b[0m         Set stow directory (default: current directory)'
+    '  -v, --verbose           Verbose output'
+    '  -n, --simulate          Do not perform actions, just show what would be done'
+    '  -F, --force             Forcefully continue, will remove/unlink anything (ignore if present)'
+    '  -f, --filter \x1b[38;5;15m<file>\x1b[0m     Run and treat its output as a continuation to .stow-ignore'
+    '  --ignore \x1b[38;5;15m<regex>\x1b[0m        Ignore files ending regex pattern'
+    '  --dotfiles              Enable special handling of dotfiles'
+    ""
+    '\x1b[1;34mExamples:\x1b[0m'
+    "  ${STOW_EXEC_NAME}"' -S nvim nu kitty'
+    "  ${STOW_EXEC_NAME}"' -D helix'
+    "  ${STOW_EXEC_NAME}"' -R -t /home/ari dotf'
+    "  ${STOW_EXEC_NAME}"' -d /usr/local/stow -t /usr/local emacs'
+    "  ${STOW_EXEC_NAME}"' -f .stow-ignore.sh'
+  )
+
+  printf '%b\n' "${help_lines[@]}"
+}
+
+function stow::build_ignore_regex {
+  [[ ! -f "${STOW_IGNORE_FILE}" && ! -f "${STOW_DYN_IGNORE}" ]] && return 0
+
+  # Maybe user thinks is a great idea to use the static one as dynamic
+  # not allow to load .stow-ignore as dynamic script, no matter which one
+  if [[ "${STOW_DYN_IGNORE##*/}" == '.stow-ignore' ]]; then
+    stow::log crit '.stow-ignore file used as dynamic ignore script, this may lead to unexpected behavior' >&2
+    return 1
+  fi
+
+  local -a regexes=("\.stow-ignore")
+  local line regex_pattern
+
+  if [[ -f "${STOW_IGNORE_FILE}" ]]; then
+    while read -r line; do
+      [[ -z "${line}" || "${line}" =~ ^[[:space:]]*# ]] && continue
+      regexes+=("${line}")
+    done < "${STOW_IGNORE_FILE}"
+  fi
+
+  if [[ -f "${STOW_DYN_IGNORE}" ]]; then
+    read -r tmp_file < <(mktemp -t bstow_dyn_ignore.XXXXXX)
+    bash -e -- "${STOW_DYN_IGNORE}" > "${tmp_file}" || {
+      stow::log e 'Error: Failed to execute dynamic ignore script' >&2
+      return 1
+    }
+    mapfile -t lines < "${tmp_file}"
+    rm -f -- "${tmp_file}"
+    regexes+=("${lines[@]}")
+  fi
+
+  IFS='|' regex_pattern="${regexes[*]}"
+  printf '(%s)' "${regex_pattern}"
+}
+
+# stow::parse_args "${@}"
+function stow::parse_args {
+  declare -g STOW_ACTION="none"
+  declare -g STOW_SOURCE="${STOW_RUN_SOURCE}"
+  declare -g STOW_TARGET="${STOW_RUN_PARENT}"
+  declare -g STOW_SIMULATE=false
+  declare -g STOW_FORCE_ACTION=false
+  declare -g STOW_IGNORE=""
+  declare -g STOW_DYN_IGNORE=""
+  declare -g STOW_DOTFILES=false
+  declare -ga STOW_PACKAGES=()
+
+  [ "${1}" == "help" ] && stow::show_help_message && exit
+
+  local argv=("${@}")
+  barg::normalize_args
+  set -- "${argv[@]}"
+
+  while ((${#} > 0)); do
+    case "${1}" in
+      --help | -h)
+        stow::show_help_message
+        exit 0
+        ;;
+      -S | --stow)
+        STOW_ACTION="stow"
+        ;;
+      -D | --delete)
+        STOW_ACTION="delete"
+        ;;
+      -R | --restow)
+        STOW_ACTION="restow"
+        ;;
+      -t | --target)
+        if [[ -z "${2}" || "${2}" =~ ^- ]]; then
+          stow::log e 'Error: --target requires a directory argument' >&2
+          exit 1
+        fi
+        STOW_TARGET="${2}"
+        shift 1
+        ;;
+      -d | --dir)
+        if [[ -z "${2}" || "${2}" =~ ^- ]]; then
+          stow::log e 'Error: --dir requires a directory argument' >&2
+          exit 1
+        fi
+        STOW_SOURCE="${2}"
+        shift 1
+        ;;
+      -v | --verbose)
+        if [[ -n "${2}" && "${2}" =~ ^[0-5]$ ]]; then
+          LOGGER_LEVEL="${2}"
+          shift 1
+        else
+          LOGGER_LEVEL="$((LOGGER_LEVEL < 5 ? LOGGER_LEVEL + 1 : 0))"
+        fi
+        ;;
+      -n | --simulate)
+        STOW_SIMULATE=true
+        ;;
+      -F | --force)
+        STOW_FORCE_ACTION=true
+        ;;
+      --ignore)
+        if [[ -z "${2}" || "${2}" =~ ^- ]]; then
+          stow::log e 'Error: --ignore requires a regex pattern argument' >&2
+          exit 1
+        fi
+        STOW_IGNORE="${2}"
+        shift 1
+        ;;
+      -f | --filter)
+        if [[ -z "${2}" || "${2}" =~ ^- ]]; then
+          stow::log e 'Error: --filter requires a path argument' >&2
+          exit 1
+        fi
+        STOW_DYN_IGNORE="${2}"
+        shift 1
+        ;;
+      --dotfiles)
+        STOW_DOTFILES=true
+        ;;
+      --* | -*)
+        stow::log e 'Error: Unknown option: %s' "\`${1}\`" >&2
+        stow::log i 'Use "help" to see available options.' >&2
+        exit 1
+        ;;
+      *)
+        STOW_PACKAGES+=("${1}")
+        ;;
+    esac
+    shift 1
+  done
+
+  # if [[ ${#STOW_PACKAGES[@]} -eq 0 ]]; then
+  #   stow::log e 'Error: No packages specified' >&2
+  #   stow::log i 'Use "help" to see usage information.' >&2
+  #   exit 1
+  # fi
+
+  if [[ ! -d "${STOW_SOURCE}" ]]; then
+    stow::log e 'Error: Stow directory does not exist: %s' "${STOW_SOURCE}" >&2
+    exit 1
+  fi
+
+  if [[ ! -d "${STOW_TARGET}" ]]; then
+    stow::log e 'Error: Target directory does not exist: %s' "${STOW_TARGET}" >&2
+    exit 1
+  fi
+
+  for i in "${!STOW_PACKAGES[@]}"; do
+    local package="${STOW_PACKAGES[i]%"${STOW_PACKAGES[i]##*[!/]}"}"
+    if [[ ! -d "${STOW_SOURCE}/${package}" ]]; then
+      stow::log e 'Error: Package directory does not exist: %s/%s' "${STOW_SOURCE}" "${package}" >&2
+      exit 1
+    fi
+    STOW_PACKAGES[i]="${package}"
+  done
+
+  STOW_IGNORE_REGEX="$(stow::build_ignore_regex)" || exit 1
+  declare -gr STOW_IGNORE_REGEX="${STOW_IGNORE_REGEX}"
+
+  stow::log i 'Stow configuration:'
+  stow::log i '  Action: %s' "${STOW_ACTION}"
+  stow::log i '  Stow directory: %s' "${STOW_SOURCE}"
+  stow::log i '  Target directory: %s' "${STOW_TARGET}"
+  stow::log i '  Packages: %s' "${STOW_PACKAGES[*]:-<this>}"
+  stow::log i '  Verbose: %s' "${LOGGER_LEVEL_NAMES[${LOGGER_LEVEL}]}"
+  stow::log i '  Simulate: %s' "${STOW_SIMULATE}"
+  stow::log i '  Forced: %s' "${STOW_FORCE_ACTION}"
+  stow::log i '  Ignore regex: %s' "${STOW_IGNORE:-<none>}"
+  stow::log i '  Ignore file regex: %s' "${STOW_IGNORE_REGEX:-<none>}"
+  stow::log i '  Dotfiles: %s' "${STOW_DOTFILES}"
+
+  [[ -n "${STOW_IGNORE}" && "${STOW_IGNORE: -1}" != '$' ]] && STOW_IGNORE="${STOW_IGNORE}$"
+
+  [[ "${STOW_ACTION}" == "none" ]] && {
+    stow::log e 'Missing action: %s' "${STOW_ACTION}"
+    stow::log i 'Valid actions are: stow, delete, restow'
+    exit 1
+  }
+}
+
+# stow::path_join "/path/to" "folder" "files"
+function stow::path_join {
+  local path
+  IFS='/' path="${*}"
+  printf '%s' "${path//\/\//\/}"
+}
+
+function stow::should_ignore {
+  local -r path="${1#"${STOW_PACKAGE_ROOT}/"}"
+
+  [[ -n "${STOW_IGNORE}" && "${path}" =~ ${STOW_IGNORE} ]] \
+    || [[ -n "${STOW_IGNORE_REGEX}" && "${path}" =~ ${STOW_IGNORE_REGEX} ]]
+}
+
+# Ensure target directory exists
+# stow::ensure_directory "/home/ari/.config/nvim"
+function stow::ensure_directory {
+  local -r dir_path="${1}"
+
+  [[ -d "${dir_path}" ]] && return
+
+  if ${STOW_SIMULATE}; then
+    stow::log debug 'WOULD CREATE DIR: %s' "${dir_path}"
+    return
+  fi
+
+  stow::log debug 'Creating directory: %s' "${dir_path}"
+
+  mkdir -p -- "${dir_path}"
+}
+
+# Remove directory if empty
+# stow::remove_empty_directory "/home/ari/.config/nvim"
+function stow::remove_empty_directory {
+  local -r dir_path="${1}"
+
+  [[ ! -d "${dir_path}" ]] && return
+
+  read -r any_member < <(find "${dir_path}" -mindepth 1 -maxdepth 1 2> /dev/null)
+
+  [[ -n "${any_member}" ]] && return
+
+  if ${STOW_SIMULATE}; then
+    stow::log debug 'WOULD REMOVE EMPTY DIR: %s' "${dir_path}"
+    return
+  fi
+
+  stow::log debug 'Removing empty directory: %s' "${dir_path}"
+
+  rmdir -- "${dir_path}"
+}
+
+# Transform dotfile names (dot-prefixed files in package become dot-prefixed in target)
+# stow::transform_dotfile "dot-vimrc" -> ".vimrc"
+function stow::transform_dotfile {
+  local -r filename="${1}"
+
+  # If filename starts with "dot-", convert to ".filename"
+  if [[ "${filename}" == 'dot-'?* ]]; then
+    printf '.%s' "${filename:4}"
+  else
+    printf '%s' "${filename}"
+  fi
+}
+
+# Remove broken links that point to a file under a tree
+# stow::clean_broken_links "/home/ari/dotfiles" "/home/ari/.config"
+function stow::clean_broken_links {
+  local -r src_fold="${1}"
+  local -r tgt_fold="${2}"
+
+  mapfile -t broken_links < <(find "${tgt_fold}" -type l ! -exec test -e {} ';' -printf '%l\n%p\n')
+  local -r broken_total="${#broken_links[@]}"
+
+  local cleaned=0
+  local symlink='' target=''
+  for ((i = 0; i < broken_total; i = i + 2)); do
+    symlink="${broken_links[i - 1]}"
+    target="${broken_links[i]}"
+
+    [[ -n "${target}" || "${target}" != "${src_fold}"* ]] && continue
+
+    ((cleaned++))
+
+    if ${STOW_SIMULATE}; then
+      stow::log debug 'WOULD UNLINK: %s' "${target_file}"
+      continue
+    fi
+
+    stow::log debug 'Removing link: %s' "${target_file}"
+
+    unlink -- "${symlink}"
+  done
+
+  ((cleaned > 0)) && stow::log debug 'Cleaned (%s) broken links' "${cleaned}"
+}
+
+# Create symlink from package file to target location
+# stow::create_symlink "/home/ari/dotfiles/.bashrc" "/home/ari/.bashrc"
+function stow::create_symlink {
+  local -r source_file="${1}"
+  local -r target_file="${2}"
+
+  if [[ -e "${target_file}" && ! -L "${target_file}" ]]; then
+    if ! ${STOW_FORCE_ACTION}; then
+      stow::log error '%s already exists and is not a symlink' "${target_file}" >&2
+      return 1
+    fi
+    stow::log warn '%s exists and is not a symlink, will be removed' "${target_file}" >&2
+  fi
+
+  if [[ -L "${target_file}" ]]; then
+    local current_target
+    read -r current_target < <(readlink "${target_file}")
+
+    if [[ "${current_target}" == "${source_file}" ]]; then
+      stow::log debug 'Already linked: %s -> %s' "${target_file}" "${source_file}"
+      return 0
+    else
+      if ! ${STOW_FORCE_ACTION}; then
+        stow::log warn '%s is already linked to %s' "${target_file}" "${current_target}" >&2
+        return 1
+      fi
+      stow::log warn '%s already exists, will be removed' "${target_file}" >&2
+    fi
+  fi
+
+  if ${STOW_SIMULATE}; then
+    stow::log debug 'WOULD LINK: %s -> %s' "${target_file}" "${source_file}"
+    return
+  fi
+
+  stow::log debug 'Creating link: %s -> %s' "${target_file}" "${source_file}"
+
+  ln -sf -- "${source_file}" "${target_file}"
+}
+
+# Remove a symlink if it points to the expected source
+# stow::remove_symlink "/home/ari/dotfiles/.bashrc" "/home/ari/.bashrc"
+function stow::remove_symlink {
+  local -r source_file="${1}"
+  local -r target_file="${2}"
+
+  [[ ! -L "${target_file}" ]] && return
+
+  local current_target
+  read -r current_target < <(readlink "${target_file}")
+
+  if [[ "${current_target}" != "${source_file}" ]]; then
+    stow::log debug 'Skipping: %s (points to %s, not %s)' "${target_file}" "${current_target}" "${source_file}"
+    return
+  fi
+
+  if ${STOW_SIMULATE}; then
+    stow::log debug 'WOULD UNLINK: %s' "${target_file}"
+    return
+  fi
+
+  stow::log debug 'Removing link: %s' "${target_file}"
+
+  unlink -- "${target_file}"
+}
+
+# Recursively create symlinks package directory tree
+# stow::walk_package_tree "/home/ari/dotfiles/nvim" "/home/ari/.config"
+function stow::link_tree {
+  local -r pkg_root="${1}"
+  local -r target_root="${2}"
+
+  local pkg_child
+  local target_child
+
+  while IFS= read -r -d '' item; do
+    read -r pkg_child < <(stow::path_join "${pkg_root}" "${item}")
+    read -r target_child < <(stow::path_join "${target_root}" "${item}")
+
+    if stow::should_ignore "${pkg_child}"; then
+      stow::log debug 'Ignoring: %s (matches pattern)' "${item}"
+      continue
+    fi
+
+    if ${STOW_DOTFILES}; then
+      rear -r item < <(stow::transform_dotfile "${pkg_child}")
+      read -r target_child < <(stow::path_join "${target_root}" "${item}")
+    fi
+
+    if [[ -f "${pkg_child}" ]]; then
+      stow::create_symlink "${pkg_child}" "${target_child}"
+      continue
+    fi
+
+    stow::ensure_directory "${target_child}"
+    stow::link_tree "${pkg_child}" "${target_child}"
+  done < <(find "${pkg_root}" -maxdepth 1 -mindepth 1 -printf '%f\0' 2> /dev/null)
+}
+
+# Recursively remove symlinks for package
+# stow::remove_package_tree "/home/ari/dotfiles/nvim" "/home/ari/.config"
+function stow::remove_package_tree {
+  local -r pkg_root="${1}"
+  local -r target_root="${2}"
+
+  local pkg_child
+  local target_child
+
+  while IFS= read -r -d '' item; do
+    read -r pkg_child < <(stow::path_join "${pkg_root}" "${item}")
+    read -r target_child < <(stow::path_join "${target_root}" "${item}")
+
+    if stow::should_ignore "${pkg_child}"; then
+      stow::log debug 'Ignoring: %s (matches pattern)' "${pkg_child}"
+      continue
+    fi
+
+    if ${STOW_DOTFILES}; then
+      rear -r item < <(stow::transform_dotfile "${pkg_child}")
+      read -r target_child < <(stow::path_join "${target_root}" "${item}")
+    fi
+
+    if [[ -f "${pkg_child}" ]]; then
+      stow::remove_symlink "${pkg_child}" "${target_child}"
+      continue
+    fi
+
+    stow::remove_package_tree "${pkg_child}" "${target_child}"
+    stow::remove_empty_directory "${target_child}"
+  done < <(find "${pkg_root}" -maxdepth 1 -mindepth 1 -printf '%f\0' 2> /dev/null)
+}
+
+function stow::process_packages {
+  local package
+
+  for package in "${STOW_PACKAGES[@]}"; do
+    read -r package_path < <(stow::path_join "${STOW_SOURCE}" "${package}")
+    read -r package_target < <(stow::path_join "${STOW_TARGET}" "${package}")
+
+    declare -g STOW_PACKAGE_ROOT="${package_path}"
+
+    stow::log info 'Processing package (%s): %s' "${STOW_ACTION}" "${package}"
+
+    case "${STOW_ACTION}" in
+      stow)
+        stow::link_tree "${package_path}" "${package_target}"
+        ;;
+      delete)
+        stow::remove_package_tree "${package_path}" "${package_target}"
+        stow::log info 'Cleaning broken links in target tree'
+        stow::clean_broken_links "${package_path}" "${package_target}"
+        ;;
+      restow)
+        stow::remove_package_tree "${package_path}" "${package_target}"
+        stow::log info 'Cleaning broken links'
+        stow::clean_broken_links "${package_path}" "${package_target}"
+        stow::link_tree "${package_path}" "${package_target}"
+        ;;
+    esac
+  done
+}
+
+function stow::execute_single_tree {
+  declare -g STOW_PACKAGE_ROOT="${STOW_SOURCE}"
+
+  stow::log info 'Processing entire source tree'
+
+  case "${STOW_ACTION}" in
+    stow)
+      stow::link_tree "${STOW_SOURCE}" "${STOW_TARGET}"
+      ;;
+    delete)
+      stow::remove_package_tree "${STOW_SOURCE}" "${STOW_TARGET}"
+      stow::log info 'Cleaning broken links in target tree'
+      stow::clean_broken_links "${STOW_SOURCE}" "${STOW_TARGET}"
+      ;;
+    restow)
+      stow::remove_package_tree "${STOW_SOURCE}" "${STOW_TARGET}"
+      stow::link_tree "${STOW_SOURCE}" "${STOW_TARGET}"
+      stow::log info 'Cleaning broken links in target tree'
+      stow::clean_broken_links "${STOW_SOURCE}" "${STOW_TARGET}"
+      ;;
+  esac
+}
+
+function stow::main {
+  read -r __ < <(realpath "${0}")
+  readonly STOW_EXEC_PATH="${__}"
+  readonly STOW_EXEC_NAME="${STOW_EXEC_PATH##*/}"
+  readonly STOW_RUN_SOURCE="${PWD}"
+  readonly STOW_RUN_PARENT="${PWD%/*}"
+  readonly STOW_IGNORE_FILE="${STOW_RUN_SOURCE}/.stow-ignore"
+  declare -g LOGGER_LEVEL=4
+
+  stow::parse_args "${@}"
+
+  if ((${#STOW_PACKAGES[@]} == 0)); then
+    stow::execute_single_tree
+  else
+    stow::process_packages
+  fi
+}
+
+stow::main "${@}"

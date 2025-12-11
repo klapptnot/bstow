@@ -237,7 +237,7 @@ function stow::parse_args {
         STOW_DOTFILES=true
         ;;
       --* | -*)
-        stow::log e 'Error: Unknown option: %s' "\`${1}\`" >&2
+        stow::log e 'Error: Unknown option %s' "\`${1}\`" >&2
         stow::log i 'Use "help" to see available options.' >&2
         exit 1
         ;;
@@ -255,19 +255,19 @@ function stow::parse_args {
   # fi
 
   if [[ ! -d "${STOW_SOURCE}" ]]; then
-    stow::log e 'Error: Stow directory does not exist: %s' "${STOW_SOURCE}" >&2
+    stow::log e 'Error: Stow directory does not exist %s' "${STOW_SOURCE}" >&2
     exit 1
   fi
 
   if [[ ! -d "${STOW_TARGET}" ]]; then
-    stow::log e 'Error: Target directory does not exist: %s' "${STOW_TARGET}" >&2
+    stow::log e 'Error: Target directory does not exist %s' "${STOW_TARGET}" >&2
     exit 1
   fi
 
   for i in "${!STOW_PACKAGES[@]}"; do
     local package="${STOW_PACKAGES[i]%"${STOW_PACKAGES[i]##*[!/]}"}"
     if [[ ! -d "${STOW_SOURCE}/${package}" ]]; then
-      stow::log e 'Error: Package directory does not exist: %s/%s' "${STOW_SOURCE}" "${package}" >&2
+      stow::log e 'Error: Package directory does not exist %s/%s' "${STOW_SOURCE}" "${package}" >&2
       exit 1
     fi
     STOW_PACKAGES[i]="${package}"
@@ -319,11 +319,11 @@ function stow::ensure_directory {
   [[ -d "${dir_path}" ]] && return
 
   if ${STOW_SIMULATE}; then
-    stow::log debug 'WOULD CREATE DIR: %s' "${dir_path}"
+    stow::log debug 'WOULD CREATE DIR %s' "${dir_path}"
     return
   fi
 
-  stow::log debug 'Creating directory: %s' "${dir_path}"
+  stow::log debug 'Creating directory %s' "${dir_path}"
 
   mkdir -p -- "${dir_path}"
 }
@@ -340,11 +340,11 @@ function stow::remove_empty_directory {
   [[ -n "${any_member}" ]] && return
 
   if ${STOW_SIMULATE}; then
-    stow::log debug 'WOULD REMOVE EMPTY DIR: %s' "${dir_path}"
+    stow::log debug 'WOULD REMOVE EMPTY DIR %s' "${dir_path}"
     return
   fi
 
-  stow::log debug 'Removing empty directory: %s' "${dir_path}"
+  stow::log debug 'Removing empty directory %s' "${dir_path}"
 
   rmdir -- "${dir_path}"
 }
@@ -382,11 +382,11 @@ function stow::clean_broken_links {
     ((cleaned++))
 
     if ${STOW_SIMULATE}; then
-      stow::log debug 'WOULD UNLINK: %s' "${target_file}"
+      stow::log debug 'WOULD UNLINK %s' "${target_file}"
       continue
     fi
 
-    stow::log debug 'Removing link: %s' "${target_file}"
+    stow::log debug 'Removing link %s' "${target_file}"
 
     unlink -- "${symlink}"
   done
@@ -413,7 +413,7 @@ function stow::create_symlink {
     read -r current_target < <(readlink "${target_file}")
 
     if [[ "${current_target}" == "${source_file}" ]]; then
-      stow::log debug 'Already linked: %s -> %s' "${target_file}" "${source_file}"
+      stow::log debug 'Already linked %s -> %s' "${target_file}" "${source_file}"
       return 0
     else
       if ! ${STOW_FORCE_ACTION}; then
@@ -425,11 +425,11 @@ function stow::create_symlink {
   fi
 
   if ${STOW_SIMULATE}; then
-    stow::log debug 'WOULD LINK: %s -> %s' "${target_file}" "${source_file}"
+    stow::log debug 'WOULD LINK %s -> %s' "${target_file}" "${source_file}"
     return
   fi
 
-  stow::log debug 'Creating link: %s -> %s' "${target_file}" "${source_file}"
+  stow::log debug 'Creating link %s -> %s' "${target_file}" "${source_file}"
 
   ln -sf -- "${source_file}" "${target_file}"
 }
@@ -446,16 +446,16 @@ function stow::remove_symlink {
   read -r current_target < <(readlink "${target_file}")
 
   if [[ "${current_target}" != "${source_file}" ]]; then
-    stow::log debug 'Skipping: %s (points to %s, not %s)' "${target_file}" "${current_target}" "${source_file}"
+    stow::log debug 'Skipping %s (points to %s, not %s)' "${target_file}" "${current_target}" "${source_file}"
     return
   fi
 
   if ${STOW_SIMULATE}; then
-    stow::log debug 'WOULD UNLINK: %s' "${target_file}"
+    stow::log debug 'WOULD UNLINK %s' "${target_file}"
     return
   fi
 
-  stow::log debug 'Removing link: %s' "${target_file}"
+  stow::log debug 'Removing link %s' "${target_file}"
 
   unlink -- "${target_file}"
 }
@@ -474,7 +474,7 @@ function stow::link_tree {
     read -r target_child < <(stow::path_join "${target_root}" "${item}")
 
     if stow::should_ignore "${pkg_child}"; then
-      stow::log debug 'Ignoring: %s (matches pattern)' "${item}"
+      stow::log debug 'Ignoring %s (matches pattern)' "${item}"
       continue
     fi
 
@@ -507,7 +507,7 @@ function stow::remove_package_tree {
     read -r target_child < <(stow::path_join "${target_root}" "${item}")
 
     if stow::should_ignore "${pkg_child}"; then
-      stow::log debug 'Ignoring: %s (matches pattern)' "${pkg_child}"
+      stow::log debug 'Ignoring %s (matches pattern)' "${pkg_child}"
       continue
     fi
 
@@ -535,7 +535,7 @@ function stow::process_packages {
 
     declare -g STOW_PACKAGE_ROOT="${package_path}"
 
-    stow::log info 'Processing package (%s): %s' "${STOW_ACTION}" "${package}"
+    stow::log info 'Processing package (%s) %s' "${STOW_ACTION}" "${package}"
 
     case "${STOW_ACTION}" in
       stow)

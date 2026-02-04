@@ -1,7 +1,7 @@
 #!/usr/bin/bash
 
 # log function is a file copy-pasted here, from
-# https://github.com/klapptnot/bash.sh
+# https://github.com/klapptnot/kitsh
 declare -gra LOGGER_LOG_COLORS=(
   ''
   '\x1b[30m\x1b[41m'
@@ -32,7 +32,7 @@ function stow::log {
 
   : "${1:0:1}"
   local -ri level="${LOGGER_LEVEL_NUMS[${_,,}]:-0}"
-  local -ri log_level="${LOGGER_LEVEL:-0}"
+  local -ri log_level="${BSTOW_LOG_LEVEL:-0}"
   ((0 == log_level || level > log_level)) && return
 
   # shellcheck disable=SC2059
@@ -205,10 +205,10 @@ function stow::parse_args {
         ;;
       -v | --verbose)
         if [[ -n "${2}" && "${2}" =~ ^[0-5]$ ]]; then
-          LOGGER_LEVEL="${2}"
+          BSTOW_LOG_LEVEL="${2}"
           shift 1
         else
-          LOGGER_LEVEL="$((LOGGER_LEVEL < 5 ? LOGGER_LEVEL + 1 : 0))"
+          BSTOW_LOG_LEVEL="$((BSTOW_LOG_LEVEL < 5 ? BSTOW_LOG_LEVEL + 1 : 0))"
         fi
         ;;
       -n | --simulate)
@@ -281,7 +281,7 @@ function stow::parse_args {
   stow::log i '  Stow directory: %s' "${STOW_SOURCE}"
   stow::log i '  Target directory: %s' "${STOW_TARGET}"
   stow::log i '  Packages: %s' "${STOW_PACKAGES[*]:-<this>}"
-  stow::log i '  Verbose: %s' "${LOGGER_LEVEL_NAMES[${LOGGER_LEVEL}]}"
+  stow::log i '  Verbose: %s' "${LOGGER_LEVEL_NAMES[${BSTOW_LOG_LEVEL}]}"
   stow::log i '  Simulate: %s' "${STOW_SIMULATE}"
   stow::log i '  Forced: %s' "${STOW_FORCE_ACTION}"
   stow::log i '  Ignore regex: %s' "${STOW_IGNORE:-<none>}"
@@ -586,7 +586,7 @@ function stow::main {
   readonly STOW_RUN_SOURCE="${PWD}"
   readonly STOW_RUN_PARENT="${PWD%/*}"
   readonly STOW_IGNORE_FILE="${STOW_RUN_SOURCE}/.stow-ignore"
-  declare -g LOGGER_LEVEL=4
+  declare -g BSTOW_LOG_LEVEL=4
 
   stow::parse_args "${@}"
 

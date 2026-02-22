@@ -392,6 +392,7 @@ function stow::clean_broken_links {
   done
 
   ((cleaned > 0)) && stow::log debug 'Cleaned (%s) broken links' "${cleaned}"
+  return 0
 }
 
 # Create symlink from package file to target location
@@ -479,7 +480,7 @@ function stow::link_tree {
     fi
 
     if ${STOW_DOTFILES}; then
-      rear -r item < <(stow::transform_dotfile "${pkg_child}")
+      read -r item < <(stow::transform_dotfile "${pkg_child}")
       read -r target_child < <(stow::path_join "${target_root}" "${item}")
     fi
 
@@ -512,7 +513,7 @@ function stow::remove_package_tree {
     fi
 
     if ${STOW_DOTFILES}; then
-      rear -r item < <(stow::transform_dotfile "${pkg_child}")
+      read -r item < <(stow::transform_dotfile "${pkg_child}")
       read -r target_child < <(stow::path_join "${target_root}" "${item}")
     fi
 

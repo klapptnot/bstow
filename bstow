@@ -1,5 +1,7 @@
 #!/usr/bin/bash
 
+shopt -s extglob
+
 # log function is a file copy-pasted here, from
 # https://github.com/klapptnot/kitsh
 declare -gra LOGGER_LOG_COLORS=(
@@ -35,7 +37,6 @@ function stow::log {
   local -ri log_level="${BSTOW_LOG_LEVEL:-0}"
   ((0 == log_level || level > log_level)) && return
 
-  # shellcheck disable=SC2059
   printf -v message "${2}" "${@:3}"
 
   local color="${LOGGER_LOG_COLORS[level]}"
@@ -44,7 +45,7 @@ function stow::log {
   else
     printf '%b%s\x1b[0m\n' "${color}" "${message}"
   fi
-}
+} >&2
 
 # function from barg.sh
 # https://github.com/klapptnot/barg.sh
@@ -101,11 +102,11 @@ function stow::show_help_message {
     '  -R, --restow            Restow packages (delete then stow)'
     '  -t, --target \x1b[38;5;15m<dir>\x1b[0m      Set target directory (default: parent of stow dir)'
     '  -d, --dir \x1b[38;5;15m<dir>\x1b[0m         Set stow directory (default: current directory)'
-    '  -v, --verbose           Verbose output'
-    '  -n, --simulate          Do not perform actions, just show what would be done'
-    '  -F, --force             Forcefully continue, will remove/unlink anything (ignore if present)'
-    '  -f, --filter \x1b[38;5;15m<file>\x1b[0m     Run and treat its output as a continuation to .stow-ignore'
-    '  --ignore \x1b[38;5;15m<regex>\x1b[0m        Ignore files ending regex pattern'
+    '  -v, --verbose \x1b[38;5;15m[lvl]\x1b[0m     Increase verbosity by 1, or set a specific level (0 to 5)'
+    '  -n, --simulate          Dry run; show what would be done without making changes'
+    '  -F, --force             Force conflicts resolution (overwrites existing files/links)'
+    '  -f, --filter \x1b[38;5;15m<script>\x1b[0m   Run script and append its stdout to ignore patterns'
+    '  --ignore \x1b[38;5;15m<regex>\x1b[0m        Ignore files where path ends with regex pattern'
     '  --dotfiles              Enable special handling of dotfiles'
     ""
     '\x1b[1;34mExamples:\x1b[0m'
@@ -125,33 +126,38 @@ function stow::build_ignore_regex {
   # Maybe user thinks is a great idea to use the static one as dynamic
   # not allow to load .stow-ignore as dynamic script, no matter which one
   if [[ "${STOW_DYN_IGNORE##*/}" == '.stow-ignore' ]]; then
-    stow::log crit '.stow-ignore file used as dynamic ignore script, this may lead to unexpected behavior' >&2
+    stow::log c '.stow-ignore file used as dynamic ignore script, this may lead to unexpected behavior'
     return 1
   fi
 
-  local -a regexes=("\.stow-ignore")
+  local -a regexes=('\.stow-ignore')
   local line regex_pattern
 
   if [[ -f "${STOW_IGNORE_FILE}" ]]; then
     while read -r line; do
-      [[ -z "${line}" || "${line}" =~ ^[[:space:]]*# ]] && continue
+      [[ -z "${line}" || "${line}" == *([[:space:]])#* ]] && continue
       regexes+=("${line}")
     done < "${STOW_IGNORE_FILE}"
   fi
 
   if [[ -f "${STOW_DYN_IGNORE}" ]]; then
-    read -r tmp_file < <(mktemp -t bstow_dyn_ignore.XXXXXX)
-    bash -e -- "${STOW_DYN_IGNORE}" > "${tmp_file}" || {
-      stow::log e 'Error: Failed to execute dynamic ignore script' >&2
+    local -a lines
+    mapfile -t lines < <(bash -e -- "${STOW_DYN_IGNORE}") 2> /dev/null || {
+      stow::log e 'Error: Failed to execute dynamic ignore script'
       return 1
     }
-    mapfile -t lines < "${tmp_file}"
-    rm -f -- "${tmp_file}"
     regexes+=("${lines[@]}")
   fi
 
   IFS='|' regex_pattern="${regexes[*]}"
   printf '(%s)' "${regex_pattern}"
+}
+
+function stow::path_normalize {
+  local -n _n="${1}"
+  _n="${_n##+(\/)}"
+  _n="${_n%%+(\/)}"
+  _n="${_n//+(\/)/\/}"
 }
 
 # stow::parse_args "${@}"
@@ -188,7 +194,7 @@ function stow::parse_args {
         STOW_ACTION="restow"
         ;;
       -t | --target)
-        if [[ -z "${2}" || "${2}" =~ ^- ]]; then
+        if [[ -z "${2}" || "${2}" == -* ]]; then
           stow::log e 'Error: --target requires a directory argument' >&2
           exit 1
         fi
@@ -196,7 +202,7 @@ function stow::parse_args {
         shift 1
         ;;
       -d | --dir)
-        if [[ -z "${2}" || "${2}" =~ ^- ]]; then
+        if [[ -z "${2}" || "${2}" == -* ]]; then
           stow::log e 'Error: --dir requires a directory argument' >&2
           exit 1
         fi
@@ -204,11 +210,11 @@ function stow::parse_args {
         shift 1
         ;;
       -v | --verbose)
-        if [[ -n "${2}" && "${2}" =~ ^[0-5]$ ]]; then
-          BSTOW_LOG_LEVEL="${2}"
+        if [[ "${2}" == *([0-9]) ]]; then
+          BSTOW_LOG_LEVEL="$((${2} % 6))"
           shift 1
         else
-          BSTOW_LOG_LEVEL="$((BSTOW_LOG_LEVEL < 5 ? BSTOW_LOG_LEVEL + 1 : 0))"
+          BSTOW_LOG_LEVEL="$((++BSTOW_LOG_LEVEL % 6))"
         fi
         ;;
       -n | --simulate)
@@ -218,7 +224,7 @@ function stow::parse_args {
         STOW_FORCE_ACTION=true
         ;;
       --ignore)
-        if [[ -z "${2}" || "${2}" =~ ^- ]]; then
+        if [[ -z "${2}" || "${2}" == -* ]]; then
           stow::log e 'Error: --ignore requires a regex pattern argument' >&2
           exit 1
         fi
@@ -226,7 +232,7 @@ function stow::parse_args {
         shift 1
         ;;
       -f | --filter)
-        if [[ -z "${2}" || "${2}" =~ ^- ]]; then
+        if [[ -z "${2}" || "${2}" == -* ]]; then
           stow::log e 'Error: --filter requires a path argument' >&2
           exit 1
         fi
@@ -265,7 +271,8 @@ function stow::parse_args {
   fi
 
   for i in "${!STOW_PACKAGES[@]}"; do
-    local package="${STOW_PACKAGES[i]%"${STOW_PACKAGES[i]##*[!/]}"}"
+    local package="${STOW_PACKAGES[i]}"
+    stow::path_normalize package
     if [[ ! -d "${STOW_SOURCE}/${package}" ]]; then
       stow::log e 'Error: Package directory does not exist %s/%s' "${STOW_SOURCE}" "${package}" >&2
       exit 1
@@ -281,18 +288,17 @@ function stow::parse_args {
   stow::log i '  Stow directory: %s' "${STOW_SOURCE}"
   stow::log i '  Target directory: %s' "${STOW_TARGET}"
   stow::log i '  Packages: %s' "${STOW_PACKAGES[*]:-<this>}"
-  stow::log i '  Verbose: %s' "${LOGGER_LEVEL_NAMES[${BSTOW_LOG_LEVEL}]}"
+  stow::log i '  Logging: %s' "${LOGGER_LEVEL_NAMES[${BSTOW_LOG_LEVEL}]}"
   stow::log i '  Simulate: %s' "${STOW_SIMULATE}"
   stow::log i '  Forced: %s' "${STOW_FORCE_ACTION}"
   stow::log i '  Ignore regex: %s' "${STOW_IGNORE:-<none>}"
   stow::log i '  Ignore file regex: %s' "${STOW_IGNORE_REGEX:-<none>}"
   stow::log i '  Dotfiles: %s' "${STOW_DOTFILES}"
 
-  [[ -n "${STOW_IGNORE}" && "${STOW_IGNORE: -1}" != '$' ]] && STOW_IGNORE="${STOW_IGNORE}$"
+  [[ -n "${STOW_IGNORE}" && "${STOW_IGNORE: -1}" != '$' ]] && STOW_IGNORE="(${STOW_IGNORE})$"
 
   [[ "${STOW_ACTION}" == "none" ]] && {
-    stow::log e 'Missing action: %s' "${STOW_ACTION}"
-    stow::log i 'Valid actions are: stow, delete, restow'
+    stow::log e 'Missing action: expected one of stow, delete, restow (see --help)'
     exit 1
   }
 }
